@@ -132,9 +132,9 @@ class IbCtx {
 
   const std::string& getDevName() const { return this->devName; };
 
+  int getAnyActivePort() const;
  private:
   bool isPortUsable(int port) const;
-  int getAnyActivePort() const;
 
   const std::string devName;
   ibv_context* ctx;

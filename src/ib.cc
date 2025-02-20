@@ -40,38 +40,16 @@ namespace mscclpp {
 
 #if defined(USE_IBVERBS)
 
-MSCCLPP_API_CPP std::vector<std::string> getActiveIbDeviceNames(int* numDevices) {
-  struct ibv_device** devices = IBVerbs::ibv_get_device_list(numDevices);
-  int count = *numDevices;
+MSCCLPP_API_CPP std::vector<std::string> getActiveIbDeviceNames(int& numActiveDevices) {
+  int count;
+  struct ibv_device** devices = IBVerbs::ibv_get_device_list(&count);
   std::vector<std::string> activeDevices;
   for (int i = 0; i < count; ++i) {
-    struct ibv_context* ctx = IBVerbs::ibv_open_device(devices[i]);
-    if (ctx == nullptr) {
-      continue;
-    }
-
-    struct ibv_device_attr devAttr;
-    if (IBVerbs::ibv_query_device(ctx, &devAttr) != 0) {
-      IBVerbs::ibv_close_device(ctx);
-      continue;
-    }
-
-    bool hasActivePort = false;
-    for (uint8_t port = 1; port <= devAttr.phys_port_cnt; ++port) {
-      struct ibv_port_attr portAttr;
-      if (IBVerbs::ibv_query_port_w(ctx, port, &portAttr) == 0 &&
-          portAttr.state == IBV_PORT_ACTIVE &&
-          (portAttr.link_layer == IBV_LINK_LAYER_ETHERNET || portAttr.link_layer == IBV_LINK_LAYER_INFINIBAND)) {
-        hasActivePort = true;
-        break;
-      }
-    }
-
-    if (hasActivePort) {
-      activeDevices.push_back(devices[i]->name);
-    }
-    IBVerbs::ibv_close_device(ctx);
+    IbCtx ctx(devices[i]->name);
+    if(ctx.getAnyActivePort() < 0) continue;
+    activeDevices.push_back(devices[i]->name);
   }
+  numActiveDevices = activeDevices.size();
   IBVerbs::ibv_free_device_list(devices);
   return activeDevices;
 }
@@ -349,7 +327,6 @@ IbCtx::IbCtx(const std::string& devName) : devName(devName) {
       break;
     }
   }
-  //freeIbDeviceListWithActivePorts(devices, num);
   IBVerbs::ibv_free_device_list(devices);
   if (this->ctx == nullptr) {
     std::stringstream err;
@@ -422,7 +399,7 @@ const IbMr* IbCtx::registerMr(void* buff, std::size_t size) {
 
 MSCCLPP_API_CPP int getIBDeviceCount() {
   int num;
-  auto const& dev = getActiveIbDeviceNames(&num);
+  auto const& dev = getActiveIbDeviceNames(num);
   return num;
 }
 
@@ -479,7 +456,7 @@ MSCCLPP_API_CPP std::string getIBDeviceName(Transport ibTransport) {
   }
 
   int num;
-  auto const& devices = getActiveIbDeviceNames(&num);
+  auto const& devices = getActiveIbDeviceNames(num);
   if (ibTransportIndex >= num) {
     std::stringstream ss;
     ss << "IB transport out of range: " << ibTransportIndex << " >= " << num;
@@ -490,7 +467,7 @@ MSCCLPP_API_CPP std::string getIBDeviceName(Transport ibTransport) {
 
 MSCCLPP_API_CPP Transport getIBTransportByDeviceName(const std::string& ibDeviceName) {
   int num;
-  auto const& devices = getActiveIbDeviceNames(&num);
+  auto const& devices = getActiveIbDeviceNames(num);
   for (int i = 0; i < num; ++i) {
     if (ibDeviceName == devices[i]) {
       switch (i) {  // TODO: get rid of this ugly switch
@@ -526,7 +503,7 @@ MSCCLPP_API_CPP std::string getIBDeviceName(Transport) { return ""; }
 
 MSCCLPP_API_CPP Transport getIBTransportByDeviceName(const std::string&) { return Transport::Unknown; }
 
-MSCCLPP_API_CPP std::vector<std::string> getActiveIbDeviceNames(int* numDevices) { *numDevices = 0; return std::vector<std::string>(); }
+MSCCLPP_API_CPP std::vector<std::string> getActiveIbDeviceNames(int& numActiveDevices) { *numDevices = 0; return std::vector<std::string>(); }
 
 #endif  // !defined(USE_IBVERBS)
 
