@@ -528,8 +528,6 @@ MSCCLPP_API_CPP Transport getIBTransportByDeviceName(const std::string&) { retur
 
 MSCCLPP_API_CPP std::vector<std::string> getActiveIbDeviceNames(int* numDevices) { *numDevices = 0; return std::vector<std::string>(); }
 
-MSCCLPP_API_CPP void freeIbDeviceListWithActivePorts(ibv_device** list, int numDevices) { }
-
 #endif  // !defined(USE_IBVERBS)
 
 }  // namespace mscclpp
