@@ -19,8 +19,9 @@ T readEnv(const std::string &envName, const T &defaultValue) {
     return atoi(envCstr);
   } else if constexpr (std::is_same_v<T, bool>) {
     return (std::string(envCstr) != "0");
+  } else {
+    return T(envCstr);
   }
-  return T(envCstr);
 }
 
 template <typename T>
@@ -61,7 +62,8 @@ Env::Env()
       commId(readEnv<std::string>("MSCCLPP_COMM_ID", "")),
       executionPlanDir(readEnv<std::string>("MSCCLPP_EXECUTION_PLAN_DIR", "")),
       npkitDumpDir(readEnv<std::string>("MSCCLPP_NPKIT_DUMP_DIR", "")),
-      cudaIpcUseDefaultStream(readEnv<bool>("MSCCLPP_CUDAIPC_USE_DEFAULT_STREAM", false)) {}
+      cudaIpcUseDefaultStream(readEnv<bool>("MSCCLPP_CUDAIPC_USE_DEFAULT_STREAM", false)),
+      ibGidIndex(readEnv<int>("MSCCLPP_IB_GID_INDEX", 0))  {}
 
 std::shared_ptr<Env> env() {
   static std::shared_ptr<Env> globalEnv = std::shared_ptr<Env>(new Env());
@@ -80,6 +82,7 @@ std::shared_ptr<Env> env() {
     logEnv("MSCCLPP_EXECUTION_PLAN_DIR", globalEnv->executionPlanDir);
     logEnv("MSCCLPP_NPKIT_DUMP_DIR", globalEnv->npkitDumpDir);
     logEnv("MSCCLPP_CUDAIPC_USE_DEFAULT_STREAM", globalEnv->cudaIpcUseDefaultStream);
+    logEnv("MSCCLPP_IB_GID_INDEX", globalEnv->ibGidIndex);
   }
   return globalEnv;
 }
