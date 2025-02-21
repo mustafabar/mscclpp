@@ -42,8 +42,12 @@ namespace mscclpp {
 
 MSCCLPP_API_CPP std::vector<std::string> getActiveIbDeviceNames(int& numActiveDevices) {
   int count;
-  struct ibv_device** devices = IBVerbs::ibv_get_device_list(&count);
   std::vector<std::string> activeDevices;
+  struct ibv_device** devices = IBVerbs::ibv_get_device_list(&count);
+  if(!devices) {
+    numActiveDevices = 0;
+    return activeDevices;
+  }
   for (int i = 0; i < count; ++i) {
     IbCtx ctx(devices[i]->name);
     if(ctx.getAnyActivePort() < 0) continue;
