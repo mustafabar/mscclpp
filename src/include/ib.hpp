@@ -54,6 +54,7 @@ struct IbQpInfo {
   int mtu;
   uint64_t iid;
   bool is_grh;
+  uint8_t gidIndex;
 };
 
 enum class WsStatus {

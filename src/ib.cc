@@ -20,6 +20,8 @@
 #include "debug.h"
 #if defined(USE_IBVERBS)
 #include "ibverbs_wrapper.hpp"
+#include <arpa/inet.h>
+#include <fcntl.h>
 #endif  // defined(USE_IBVERBS)
 
 #if !defined(__HIP_PLATFORM_AMD__)
@@ -40,7 +42,7 @@ namespace mscclpp {
 
 #if defined(USE_IBVERBS)
 
-MSCCLPP_API_CPP std::vector<std::string> getActiveIbDeviceNames(int& numActiveDevices) {
+static std::vector<std::string> getActiveIbDeviceNames(int& numActiveDevices) {
   int count;
   std::vector<std::string> activeDevices;
   struct ibv_device** devices = IBVerbs::ibv_get_device_list(&count);
@@ -56,6 +58,148 @@ MSCCLPP_API_CPP std::vector<std::string> getActiveIbDeviceNames(int& numActiveDe
   numActiveDevices = activeDevices.size();
   IBVerbs::ibv_free_device_list(devices);
   return activeDevices;
+}
+
+static bool isConfiguredGid(union ibv_gid* gid)
+{
+  const struct in6_addr *a = (struct in6_addr *)gid->raw;
+  int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
+  if (((a->s6_addr32[0] | trailer) == 0UL) ||
+      ((a->s6_addr32[0] == htonl(0xfe800000)) && (trailer == 0UL))) {
+    return false;
+  }
+  return true;
+}
+
+static bool isLinkLocalGid(union ibv_gid const& gid)
+{
+  const struct in6_addr *a = (struct in6_addr *) gid.raw;
+  if (a->s6_addr32[0] == htonl(0xfe800000) && a->s6_addr32[1] == 0UL) {
+    return true;
+  }
+  return false;
+}
+
+static int getRoceVersionNumber(struct ibv_context* const& context, int const& portNum, int const& gidIndex)
+{
+  char const* deviceName = ibv_get_device_name(context->device);
+  char gidRoceVerStr[16]      = {};
+  char roceTypePath[PATH_MAX] = {};
+
+  sprintf(roceTypePath, "/sys/class/infiniband/%s/ports/%d/gid_attrs/types/%d",
+          deviceName, portNum, gidIndex);
+
+
+  int fd = open(roceTypePath, O_RDONLY);
+  if (fd == -1) {
+    std::stringstream err;
+    err << "Failed while opening RoCE file path " << roceTypePath;
+    throw mscclpp::Error(err.str(), ErrorCode::InternalError);
+  }
+
+  int ret = read(fd, gidRoceVerStr, 15);
+  close(fd);
+
+  if (ret == -1) {
+    std::stringstream err;
+    err << "Failed while reading RoCE version";
+    throw mscclpp::Error(err.str(), ErrorCode::InternalError);
+  }
+
+  if (strlen(gidRoceVerStr)) {
+    if (strncmp(gidRoceVerStr, "IB/RoCE v1", strlen("IB/RoCE v1")) == 0
+        || strncmp(gidRoceVerStr, "RoCE v1", strlen("RoCE v1")) == 0) {
+      return 1;
+    }
+    else if (strncmp(gidRoceVerStr, "RoCE v2", strlen("RoCE v2")) == 0) {
+      return 2;
+    }
+  }
+  return -1;
+}
+
+static bool isIPv4MappedIPv6(const union ibv_gid &gid)
+{
+  // look for ::ffff:x.x.x.x format
+  // From Broadcom documentation
+  // https://techdocs.broadcom.com/us/en/storage-and-ethernet-connectivity/ethernet-nic-controllers/bcm957xxx/adapters/frequently-asked-questions1.html
+  // "The IPv4 address is really an IPv4 address mapped into the IPv6 address space.
+  // This can be identified by 80 “0” bits, followed by 16 “1” bits (“FFFF” in hexadecimal)
+  // followed by the original 32-bit IPv4 address."
+  return (gid.global.subnet_prefix == 0    &&
+          gid.raw[8]               == 0    &&
+          gid.raw[9]               == 0    &&
+          gid.raw[10]              == 0xff &&
+          gid.raw[11]              == 0xff);
+}
+
+static uint8_t getGidIndex(struct ibv_context* context, int const& ibPort, int const& gidTblLen)
+{
+  union ibv_gid gid;
+  int roceV2Ipv4MappedIndex = -1;
+  int roceV1Ipv4MappedIndex = -1;
+  int roceV2Ipv6Index = -1;
+  int roceV1Ipv6Index = -1;
+  int rocev2LinkLocalIndex = -1;
+  int rocev1LinkLocalIndex = -1;
+
+  for (int i = 0; i < gidTblLen; ++i) {
+    if (ibv_query_gid(context, ibPort , i, &gid) != 0) continue;
+    if (!isConfiguredGid(&gid)) continue;
+    int gidCurrRoceVersion;
+    gidCurrRoceVersion = getRoceVersionNumber(context, ibPort, i);
+    if(gidCurrRoceVersion < 1) continue;
+    if (isIPv4MappedIPv6(gid)) {
+      if (gidCurrRoceVersion == 2) {
+        roceV2Ipv4MappedIndex = i;  // Highest priority
+      } else {
+        roceV1Ipv4MappedIndex = i;
+      }
+    } else if (!isLinkLocalGid(gid)) {
+      if (gidCurrRoceVersion == 2) {
+        roceV2Ipv6Index = i;
+      } else {
+        roceV1Ipv6Index = i;
+      }
+    } else {
+      if (gidCurrRoceVersion == 2) {
+        rocev2LinkLocalIndex = i;
+      } else {
+        rocev1LinkLocalIndex = i;
+      }
+    }
+  }
+
+  // Select the best available GID based on priority
+  // * Priority Order:
+  // * 1. RoCE v2 (IPv4-mapped): ::ffff:192.168.x.x
+  // * 2. RoCE v2 (Not IPv4-mapped)
+  // * 3. RoCE v1 (IPv4-mapped)
+  // * 4. RoCE v1 (Not IPv4-mapped)
+  // * 5. RoCE v2 (Link-local): fe80::/10
+  // * 6. RoCE v1 (Link-local)
+  int gidIndex = -1;
+  if (roceV2Ipv4MappedIndex != -1) {
+    gidIndex = roceV2Ipv4MappedIndex;
+  } else if (roceV2Ipv6Index != -1) {
+    gidIndex = roceV2Ipv6Index;
+  } else if (roceV1Ipv4MappedIndex != -1) {
+    gidIndex = roceV1Ipv4MappedIndex;
+  } else if (roceV1Ipv6Index != -1) {
+    gidIndex = roceV1Ipv6Index;
+  } else if (rocev2LinkLocalIndex != -1) {
+    gidIndex = rocev2LinkLocalIndex;
+  } else if (rocev1LinkLocalIndex != -1) {
+    gidIndex = rocev1LinkLocalIndex;
+  } else {
+    std::stringstream err;
+    err << "Auto GetGidIndex failed. Try setting MSCCLPP_IB_GID_INDEX directly";
+    throw mscclpp::Error(err.str(), ErrorCode::SystemError);
+  }
+  if(gidIndex >= UINT8_MAX || gidIndex < 0) {
+    throw mscclpp::Error("Invalid auto-deteced gidIndex : " + std::to_string(gidIndex), ErrorCode::SystemError);
+  }
+  return static_cast<uint8_t>(gidIndex);
 }
 
 IbMr::IbMr(ibv_pd* pd, void* buff, std::size_t size) : buff(buff) {
@@ -135,8 +279,9 @@ IbQp::IbQp(ibv_context* ctx, ibv_pd* pd, int port, int maxCqSize, int maxCqPollN
   this->info.is_grh = (portAttr.flags & IBV_QPF_GRH_REQUIRED);
 
   if (portAttr.link_layer != IBV_LINK_LAYER_INFINIBAND || this->info.is_grh) {
+    this->info.gidIndex = (env()->ibGidIndex < 0) ? getGidIndex(ctx, port, portAttr.gid_tbl_len) : env()->ibGidIndex;
     union ibv_gid gid;
-    if (IBVerbs::ibv_query_gid(ctx, port, env()->ibGidIndex, &gid) != 0) {
+    if (IBVerbs::ibv_query_gid(ctx, port, this->info.gidIndex, &gid) != 0) {
       std::stringstream err;
       err << "ibv_query_gid failed (errno " << errno << ")";
       throw mscclpp::IbError(err.str(), errno);
@@ -182,7 +327,7 @@ void IbQp::rtr(const IbQpInfo& info) {
     qp_attr.ah_attr.grh.dgid.global.subnet_prefix = info.spn;
     qp_attr.ah_attr.grh.dgid.global.interface_id = info.iid;
     qp_attr.ah_attr.grh.flow_label = 0;
-    qp_attr.ah_attr.grh.sgid_index = env()->ibGidIndex;
+    qp_attr.ah_attr.grh.sgid_index = this->info.gidIndex;
     qp_attr.ah_attr.grh.hop_limit = 255;
     qp_attr.ah_attr.grh.traffic_class = 0;
   } else {
@@ -506,8 +651,6 @@ MSCCLPP_API_CPP int getIBDeviceCount() { return 0; }
 MSCCLPP_API_CPP std::string getIBDeviceName(Transport) { return ""; }
 
 MSCCLPP_API_CPP Transport getIBTransportByDeviceName(const std::string&) { return Transport::Unknown; }
-
-MSCCLPP_API_CPP std::vector<std::string> getActiveIbDeviceNames(int& numActiveDevices) { *numDevices = 0; return std::vector<std::string>(); }
 
 #endif  // !defined(USE_IBVERBS)
 

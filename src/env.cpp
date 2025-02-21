@@ -63,7 +63,7 @@ Env::Env()
       executionPlanDir(readEnv<std::string>("MSCCLPP_EXECUTION_PLAN_DIR", "")),
       npkitDumpDir(readEnv<std::string>("MSCCLPP_NPKIT_DUMP_DIR", "")),
       cudaIpcUseDefaultStream(readEnv<bool>("MSCCLPP_CUDAIPC_USE_DEFAULT_STREAM", false)),
-      ibGidIndex(readEnv<int>("MSCCLPP_IB_GID_INDEX", 0))  {}
+      ibGidIndex(readEnv<int>("MSCCLPP_IB_GID_INDEX", -1))  {}
 
 std::shared_ptr<Env> env() {
   static std::shared_ptr<Env> globalEnv = std::shared_ptr<Env>(new Env());
