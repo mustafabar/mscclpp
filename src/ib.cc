@@ -133,65 +133,33 @@ static bool isIPv4MappedIPv6(const union ibv_gid &gid)
           gid.raw[11]              == 0xff);
 }
 
+
 static uint8_t getGidIndex(struct ibv_context* context, int const& ibPort, int const& gidTblLen)
 {
   union ibv_gid gid;
-  int roceV2Ipv4MappedIndex = -1;
-  int roceV1Ipv4MappedIndex = -1;
-  int roceV2Ipv6Index = -1;
-  int roceV1Ipv6Index = -1;
-  int rocev2LinkLocalIndex = -1;
-  int rocev1LinkLocalIndex = -1;
-
+  GidPriority highestPriority = GidPriority::UNKNOWN;
+  int gidIndex = -1;
   for (int i = 0; i < gidTblLen; ++i) {
     if (ibv_query_gid(context, ibPort , i, &gid) != 0) continue;
     if (!isConfiguredGid(&gid)) continue;
     int gidCurrRoceVersion;
     gidCurrRoceVersion = getRoceVersionNumber(context, ibPort, i);
     if(gidCurrRoceVersion < 1) continue;
+    GidPriority currPriority;
     if (isIPv4MappedIPv6(gid)) {
-      if (gidCurrRoceVersion == 2) {
-        roceV2Ipv4MappedIndex = i;  // Highest priority
-      } else {
-        roceV1Ipv4MappedIndex = i;
-      }
+      currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_IPV4 : GidPriority::ROCEV1_IPV4;
     } else if (!isLinkLocalGid(gid)) {
-      if (gidCurrRoceVersion == 2) {
-        roceV2Ipv6Index = i;
-      } else {
-        roceV1Ipv6Index = i;
-      }
+      currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_IPV6 : GidPriority::ROCEV1_IPV6;
     } else {
-      if (gidCurrRoceVersion == 2) {
-        rocev2LinkLocalIndex = i;
-      } else {
-        rocev1LinkLocalIndex = i;
-      }
+      currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_LINK_LOCAL : GidPriority::ROCEV1_LINK_LOCAL;
+    }
+    if(currPriority > highestPriority) {
+      highestPriority = currPriority;
+      gidIndex = i;
     }
   }
 
-  // Select the best available GID based on priority
-  // * Priority Order:
-  // * 1. RoCE v2 (IPv4-mapped): ::ffff:192.168.x.x
-  // * 2. RoCE v2 (Not IPv4-mapped)
-  // * 3. RoCE v1 (IPv4-mapped)
-  // * 4. RoCE v1 (Not IPv4-mapped)
-  // * 5. RoCE v2 (Link-local): fe80::/10
-  // * 6. RoCE v1 (Link-local)
-  int gidIndex = -1;
-  if (roceV2Ipv4MappedIndex != -1) {
-    gidIndex = roceV2Ipv4MappedIndex;
-  } else if (roceV2Ipv6Index != -1) {
-    gidIndex = roceV2Ipv6Index;
-  } else if (roceV1Ipv4MappedIndex != -1) {
-    gidIndex = roceV1Ipv4MappedIndex;
-  } else if (roceV1Ipv6Index != -1) {
-    gidIndex = roceV1Ipv6Index;
-  } else if (rocev2LinkLocalIndex != -1) {
-    gidIndex = rocev2LinkLocalIndex;
-  } else if (rocev1LinkLocalIndex != -1) {
-    gidIndex = rocev1LinkLocalIndex;
-  } else {
+  if(highestPriority == GidPriority::UNKNOWN){
     std::stringstream err;
     err << "Auto GetGidIndex failed. Try setting MSCCLPP_IB_GID_INDEX directly";
     throw mscclpp::Error(err.str(), ErrorCode::SystemError);

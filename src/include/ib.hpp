@@ -143,7 +143,21 @@ class IbCtx {
   std::list<std::unique_ptr<IbQp>> qps;
   std::list<std::unique_ptr<IbMr>> mrs;
 };
-
+/**
+  * Enumeration of GID priority
+  *
+  * @note These are the GID types ordered in priority from lowest (0) to highest
+  */
+enum GidPriority
+{
+  UNKNOWN           = -1,                      ///< Default
+  ROCEV1_LINK_LOCAL = 0,                       ///< RoCEv1 Link-local
+  ROCEV2_LINK_LOCAL = 1,                       ///< RoCEv2 Link-local fe80::/10
+  ROCEV1_IPV6       = 2,                       ///< RoCEv1 IPv6
+  ROCEV2_IPV6       = 3,                       ///< RoCEv2 IPv6
+  ROCEV1_IPV4       = 4,                       ///< RoCEv1 IPv4-mapped IPv6
+  ROCEV2_IPV4       = 5,                       ///< RoCEv2 IPv4-mapped IPv6 ::ffff:192.168.x.x
+};
 }  // namespace mscclpp
 
 #endif  // MSCCLPP_IB_HPP_
