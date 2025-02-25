@@ -421,7 +421,19 @@ void IbQp::postSend() {
 int IbQp::pollCq() {
   int wcNum = IBVerbs::ibv_poll_cq(this->cq, this->maxCqPollNum, this->wcs->data());
   if (wcNum > 0) {
-    this->numSignaledPostedItems -= wcNum;
+    for (int i = 0; i < wcNum; ++i) {
+      if ((*this->wcs)[i].status != IBV_WC_SUCCESS) {
+        std::stringstream err;
+        err << "Work completion at index " << i << " failed with status " << (*this->wcs)[i].status
+            << " (" << IBVerbs::ibv_wc_status_str((*this->wcs)[i].status) << ")";
+        throw mscclpp::IbError(err.str(), (*this->wcs)[i].status);
+      }
+      this->numSignaledPostedItems--;
+    }
+  } else if (wcNum < 0) {
+    std::stringstream err;
+    err << "ibv_poll_cq failed with negative completion";
+    throw mscclpp::IbError(err.str(), errno);
   }
   return wcNum;
 }
