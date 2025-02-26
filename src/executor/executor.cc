@@ -213,17 +213,9 @@ struct Executor::Impl {
                         size_t recvBufferSize) {
     std::vector<int> connectedPeers = plan.impl_->getConnectedPeers(rank);
     std::vector<mscclpp::NonblockingFuture<std::shared_ptr<mscclpp::Connection>>> connectionFutures;
-    auto ibvDeviceCount = getIBDeviceCount();
     for (int peer : connectedPeers) {
-      Transport transport = Transport::CudaIpc;
-      if(!inSameNode(rank, peer, this->nranksPerNode)) {
-        // avoid segfaulting when NIC Count < nranks count per node
-        if(rank % this->nranksPerNode > ibvDeviceCount) {
-          throw Error("Rank index exceeds available IB device count (" + std::to_string(ibvDeviceCount) + ").\
-                       Set NIC assignments manually through MSCCLPP_HCA_DEVICES", ErrorCode::ExecutorError);
-        }
-        transport = IBs[rank % this->nranksPerNode];
-      }
+      Transport transport =
+          inSameNode(rank, peer, this->nranksPerNode) ? Transport::CudaIpc : IBs[rank % this->nranksPerNode];
       connectionFutures.push_back(this->comm->connectOnSetup(peer, 0, transport));
     }
     this->comm->setup();
