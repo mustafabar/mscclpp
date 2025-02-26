@@ -236,7 +236,7 @@ IbQp::IbQp(ibv_context* ctx, ibv_pd* pd, int port, int maxCqSize, int maxCqPollN
   struct ibv_port_attr portAttr;
   if (IBVerbs::ibv_query_port_w(ctx, port, &portAttr) != 0) {
     std::stringstream err;
-    err << "ibv_query_port failed (errno " << errno << ")";
+    err << "ibv_query_port failed (errno " << errno << ", port << " << port << ")";
     throw mscclpp::IbError(err.str(), errno);
   }
   this->info.lid = portAttr.lid;
