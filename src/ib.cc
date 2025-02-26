@@ -24,20 +24,63 @@
 #include <fcntl.h>
 #endif  // defined(USE_IBVERBS)
 
-#if !defined(__HIP_PLATFORM_AMD__)
+// Check if nvidia/amd_peermem kernel module is loaded
+static bool checkPeerMemLoaded() {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+  static int moduleLoaded = -1;
+  if (moduleLoaded == -1) {
+    // Check for `memory_peers` directory containing `amdkfd/version`
+    // This `memory_peers` directory is created by NIC-GPU driver interaction
+    // On Linux kernel 5.15.0 (e.g. Ubuntu 22.04), `memory_peers` is created under `/sys/kernel/mm/`
+    // However, on newer kernels like Ubuntu 24.04.1 (Linux kernel 6.8.0) or Ubuntu 22.04.4 HWE (Linux kernel 6.5.0),
+    // this `memory_peers` directory is either not created (go to else-if condition)
+    // or created under a different path like `/sys/kernel/` or `/sys/` (depending on your ib_peer_mem module)
+    std::vector<std::string> memory_peers_paths = {"/sys/kernel/mm/memory_peers/amdkfd/version",
+                                                   "/sys/kernel/memory_peers/amdkfd/version",
+                                                   "/sys/memory_peers/amdkfd/version"};
 
-// Check if nvidia_peermem kernel module is loaded
-static bool checkNvPeerMemLoaded() {
+    moduleLoaded = 0;
+    for (const auto& path : memory_peers_paths) {
+      if (access(path.c_str(), F_OK) == 0) {
+        moduleLoaded = 1;
+        INFO(MSCCLPP_NET,"Found %s", path.c_str());
+        break;
+      }
+    }
+
+    if (moduleLoaded == 0) {
+      // Check for `ib_register_peer_memory_client` symbol in `/proc/kallsyms`
+      // if your system uses native OS ib_peer module
+      char buf[256];
+      FILE *fp = NULL;
+      fp = fopen("/proc/kallsyms", "r");
+
+      if (fp == NULL) {
+        INFO(MSCCLPP_NET,"Could not open /proc/kallsyms");
+      } else {
+        while (fgets(buf, sizeof(buf), fp) != NULL) {
+          if (strstr(buf, "t ib_register_peer_memory_client") != NULL ||
+              strstr(buf, "T ib_register_peer_memory_client") != NULL) {
+            moduleLoaded = 1;
+            INFO(MSCCLPP_NET,"Found ib_register_peer_memory_client in /proc/kallsyms");
+            break;
+          }
+        }
+      }
+    }
+  }
+  return (moduleLoaded == 1);
+#else
   std::ifstream file("/proc/modules");
   std::string line;
   while (std::getline(file, line)) {
-    if (line.find("nvidia_peermem") != std::string::npos) return true;
+    if (line.find("nvidia_peermem") != std::string::npos) {
+      return true;
+    }
   }
   return false;
+#endif
 }
-
-#endif  // !defined(__HIP_PLATFORM_AMD__)
-
 namespace mscclpp {
 
 #if defined(USE_IBVERBS)
@@ -443,11 +486,10 @@ int IbQp::getWcStatus(int idx) const { return (*this->wcs)[idx].status; }
 int IbQp::getNumCqItems() const { return this->numSignaledPostedItems; }
 
 IbCtx::IbCtx(const std::string& devName) : devName(devName) {
-#if !defined(__HIP_PLATFORM_AMD__)
-  if (!checkNvPeerMemLoaded()) {
-    throw mscclpp::Error("nvidia_peermem kernel module is not loaded", ErrorCode::InternalError);
+  if (!checkPeerMemLoaded()) {
+    throw mscclpp::Error("nvidia/amd_peermem kernel module is not loaded", ErrorCode::InternalError);
   }
-#endif  // !defined(__HIP_PLATFORM_AMD__)
+
   int num;
   struct ibv_device** devices = IBVerbs::ibv_get_device_list(&num);
   for (int i = 0; i < num; ++i) {
