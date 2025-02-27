@@ -18,6 +18,7 @@ struct ibv_cq;
 struct ibv_wc;
 struct ibv_send_wr;
 struct ibv_sge;
+struct ibv_port_attr;
 
 namespace mscclpp {
 
@@ -91,7 +92,7 @@ class IbQp {
     ibv_sge* sge;
   };
 
-  IbQp(ibv_context* ctx, ibv_pd* pd, int port, int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr,
+  IbQp(ibv_context* ctx, ibv_pd* pd, int port, ibv_port_attr& portAttr, int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr,
        int maxWrPerSend);
   WrInfo getNewWrInfo();
 
@@ -133,9 +134,9 @@ class IbCtx {
 
   const std::string& getDevName() const { return this->devName; };
 
-  int getAnyActivePort() const;
+  int getAnyActivePort(struct ibv_port_attr& portAttr) const;
  private:
-  bool isPortUsable(int port) const;
+  bool isPortUsable(int port, struct ibv_port_attr& portAttr) const;
 
   const std::string devName;
   ibv_context* ctx;

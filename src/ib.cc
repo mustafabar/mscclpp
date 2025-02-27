@@ -95,7 +95,8 @@ static std::vector<std::string> getActiveIbDeviceNames(int& numActiveDevices) {
   }
   for (int i = 0; i < count; ++i) {
     IbCtx ctx(devices[i]->name);
-    if(ctx.getAnyActivePort() < 0) continue;
+    struct ibv_port_attr portAttr;
+    if(ctx.getAnyActivePort(portAttr) < 0) continue;
     activeDevices.push_back(devices[i]->name);
   }
   numActiveDevices = activeDevices.size();
@@ -247,7 +248,7 @@ const void* IbMr::getBuff() const { return this->buff; }
 
 uint32_t IbMr::getLkey() const { return this->mr->lkey; }
 
-IbQp::IbQp(ibv_context* ctx, ibv_pd* pd, int port, int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr,
+IbQp::IbQp(ibv_context* ctx, ibv_pd* pd, int port, ibv_port_attr& portAttr, int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr,
            int maxWrPerSend)
     : numSignaledPostedItems(0), numSignaledStagedItems(0), maxCqPollNum(maxCqPollNum), maxWrPerSend(maxWrPerSend) {
   this->cq = IBVerbs::ibv_create_cq(ctx, maxCqSize, nullptr, nullptr, 0);
@@ -276,12 +277,6 @@ IbQp::IbQp(ibv_context* ctx, ibv_pd* pd, int port, int maxCqSize, int maxCqPollN
     throw mscclpp::IbError(err.str(), errno);
   }
 
-  struct ibv_port_attr portAttr;
-  if (IBVerbs::ibv_query_port_w(ctx, port, &portAttr) != 0) {
-    std::stringstream err;
-    err << "ibv_query_port failed (errno " << errno << ", port << " << port << ")";
-    throw mscclpp::IbError(err.str(), errno);
-  }
   this->info.lid = portAttr.lid;
   this->info.port = port;
   this->info.linkLayer = portAttr.link_layer;
@@ -474,9 +469,9 @@ int IbQp::pollCq() {
       this->numSignaledPostedItems--;
     }
   } else if (wcNum < 0) {
-    std::stringstream err;
-    err << "ibv_poll_cq failed with negative completion";
-    throw mscclpp::IbError(err.str(), errno);
+      std::stringstream err;
+      err << "ibv_poll_cq failed with negative completion";
+      throw mscclpp::IbError(err.str(), errno);
   }
   return wcNum;
 }
@@ -523,8 +518,7 @@ IbCtx::~IbCtx() {
   }
 }
 
-bool IbCtx::isPortUsable(int port) const {
-  struct ibv_port_attr portAttr;
+bool IbCtx::isPortUsable(int port, struct ibv_port_attr& portAttr) const {
   if (IBVerbs::ibv_query_port_w(this->ctx, port, &portAttr) != 0) {
     std::stringstream err;
     err << "ibv_query_port failed (errno " << errno << ", port << " << port << ")";
@@ -534,7 +528,7 @@ bool IbCtx::isPortUsable(int port) const {
          (portAttr.link_layer == IBV_LINK_LAYER_ETHERNET || portAttr.link_layer == IBV_LINK_LAYER_INFINIBAND);
 }
 
-int IbCtx::getAnyActivePort() const {
+int IbCtx::getAnyActivePort(struct ibv_port_attr& portAttr) const {
   struct ibv_device_attr devAttr;
   if (IBVerbs::ibv_query_device(this->ctx, &devAttr) != 0) {
     std::stringstream err;
@@ -542,7 +536,7 @@ int IbCtx::getAnyActivePort() const {
     throw mscclpp::IbError(err.str(), errno);
   }
   for (uint8_t port = 1; port <= devAttr.phys_port_cnt; ++port) {
-    if (this->isPortUsable(port)) {
+    if (this->isPortUsable(port, portAttr)) {
       return port;
     }
   }
@@ -551,15 +545,16 @@ int IbCtx::getAnyActivePort() const {
 
 IbQp* IbCtx::createQp(int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr, int maxWrPerSend,
                       int port /*=-1*/) {
+  struct ibv_port_attr portAttr;
   if (port == -1) {
-    port = this->getAnyActivePort();
+    port = this->getAnyActivePort(portAttr);
     if (port == -1) {
       throw mscclpp::Error("No active port found", ErrorCode::InvalidUsage);
     }
-  } else if (!this->isPortUsable(port)) {
+  } else if (!this->isPortUsable(port, portAttr)) {
     throw mscclpp::Error("invalid IB port: " + std::to_string(port), ErrorCode::InvalidUsage);
   }
-  qps.emplace_back(new IbQp(this->ctx, this->pd, port, maxCqSize, maxCqPollNum, maxSendWr, maxRecvWr, maxWrPerSend));
+  qps.emplace_back(new IbQp(this->ctx, this->pd, port, portAttr, maxCqSize, maxCqPollNum, maxSendWr, maxRecvWr, maxWrPerSend));
   return qps.back().get();
 }
 
