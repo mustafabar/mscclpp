@@ -335,7 +335,7 @@ void IbQp::rtr(const IbQpInfo& info) {
     qp_attr.ah_attr.grh.flow_label = 0;
     qp_attr.ah_attr.grh.sgid_index = this->info.gidIndex;
     qp_attr.ah_attr.grh.hop_limit = 255;
-    qp_attr.ah_attr.grh.traffic_class = 0;
+    qp_attr.ah_attr.grh.traffic_class = env()->ibTrafficClass;
   } else {
     qp_attr.ah_attr.is_global = 0;
   }

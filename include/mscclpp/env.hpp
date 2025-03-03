@@ -31,6 +31,7 @@ class Env {
   const std::string npkitDumpDir;
   const bool cudaIpcUseDefaultStream;
   const int ibGidIndex;
+  const int ibTrafficClass;
 
  private:
   Env();
