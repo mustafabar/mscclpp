@@ -327,6 +327,8 @@ int FindInterfaces(char* ifNames, union SocketAddress* ifAddrs, int ifNameMaxSiz
         nIfs = FindInterfaceMatchSubnet(ifNames, ifAddrs, &idAddr, ifNameMaxSize, maxIfs);
       }
     }
+    // Look for Ethernet if no IB interface was found
+    if (nIfs == 0) nIfs = findInterfaces("en", ifNames, ifAddrs, sock_family, ifNameMaxSize, maxIfs);
     // Then look for anything else (but not docker or lo)
     if (nIfs == 0) nIfs = findInterfaces("^docker,lo", ifNames, ifAddrs, sock_family, ifNameMaxSize, maxIfs);
     // Finally look for docker, then lo.

@@ -20,25 +20,200 @@
 #include "debug.h"
 #if defined(USE_IBVERBS)
 #include "ibverbs_wrapper.hpp"
+#include <arpa/inet.h>
+#include <fcntl.h>
 #endif  // defined(USE_IBVERBS)
 
-#if !defined(__HIP_PLATFORM_AMD__)
+// Check if nvidia/amd_peermem kernel module is loaded
+static bool checkPeerMemLoaded() {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+  static int moduleLoaded = -1;
+  if (moduleLoaded == -1) {
+    // Check for `memory_peers` directory containing `amdkfd/version`
+    // This `memory_peers` directory is created by NIC-GPU driver interaction
+    // On Linux kernel 5.15.0 (e.g. Ubuntu 22.04), `memory_peers` is created under `/sys/kernel/mm/`
+    // However, on newer kernels like Ubuntu 24.04.1 (Linux kernel 6.8.0) or Ubuntu 22.04.4 HWE (Linux kernel 6.5.0),
+    // this `memory_peers` directory is either not created (go to else-if condition)
+    // or created under a different path like `/sys/kernel/` or `/sys/` (depending on your ib_peer_mem module)
+    std::vector<std::string> memory_peers_paths = {"/sys/kernel/mm/memory_peers/amdkfd/version",
+                                                   "/sys/kernel/memory_peers/amdkfd/version",
+                                                   "/sys/memory_peers/amdkfd/version"};
 
-// Check if nvidia_peermem kernel module is loaded
-static bool checkNvPeerMemLoaded() {
+    moduleLoaded = 0;
+    for (const auto& path : memory_peers_paths) {
+      if (access(path.c_str(), F_OK) == 0) {
+        moduleLoaded = 1;
+        INFO(MSCCLPP_NET,"Found %s", path.c_str());
+        break;
+      }
+    }
+
+    if (moduleLoaded == 0) {
+      // Check for `ib_register_peer_memory_client` symbol in `/proc/kallsyms`
+      // if your system uses native OS ib_peer module
+      char buf[256];
+      FILE *fp = NULL;
+      fp = fopen("/proc/kallsyms", "r");
+
+      if (fp == NULL) {
+        INFO(MSCCLPP_NET,"Could not open /proc/kallsyms");
+      } else {
+        while (fgets(buf, sizeof(buf), fp) != NULL) {
+          if (strstr(buf, "t ib_register_peer_memory_client") != NULL ||
+              strstr(buf, "T ib_register_peer_memory_client") != NULL) {
+            moduleLoaded = 1;
+            INFO(MSCCLPP_NET,"Found ib_register_peer_memory_client in /proc/kallsyms");
+            break;
+          }
+        }
+      }
+    }
+  }
+  return (moduleLoaded == 1);
+#else
   std::ifstream file("/proc/modules");
   std::string line;
   while (std::getline(file, line)) {
-    if (line.find("nvidia_peermem") != std::string::npos) return true;
+    if (line.find("nvidia_peermem") != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+#endif
+}
+namespace mscclpp {
+
+#if defined(USE_IBVERBS)
+
+static std::vector<std::string> getActiveIbDeviceNames(int& numActiveDevices) {
+  int count;
+  std::vector<std::string> activeDevices;
+  struct ibv_device** devices = IBVerbs::ibv_get_device_list(&count);
+  if(!devices) {
+    numActiveDevices = 0;
+    return activeDevices;
+  }
+  for (int i = 0; i < count; ++i) {
+    IbCtx ctx(devices[i]->name);
+    struct ibv_port_attr portAttr;
+    if(ctx.getAnyActivePort(portAttr) < 0) continue;
+    activeDevices.push_back(devices[i]->name);
+  }
+  numActiveDevices = activeDevices.size();
+  IBVerbs::ibv_free_device_list(devices);
+  return activeDevices;
+}
+
+static bool isConfiguredGid(union ibv_gid* gid)
+{
+  const struct in6_addr *a = (struct in6_addr *)gid->raw;
+  int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
+  if (((a->s6_addr32[0] | trailer) == 0UL) ||
+      ((a->s6_addr32[0] == htonl(0xfe800000)) && (trailer == 0UL))) {
+    return false;
+  }
+  return true;
+}
+
+static bool isLinkLocalGid(union ibv_gid const& gid)
+{
+  const struct in6_addr *a = (struct in6_addr *) gid.raw;
+  if (a->s6_addr32[0] == htonl(0xfe800000) && a->s6_addr32[1] == 0UL) {
+    return true;
   }
   return false;
 }
 
-#endif  // !defined(__HIP_PLATFORM_AMD__)
+static int getRoceVersionNumber(struct ibv_context* const& context, int const& portNum, int const& gidIndex)
+{
+  char const* deviceName = ibv_get_device_name(context->device);
+  char gidRoceVerStr[16]      = {};
+  char roceTypePath[PATH_MAX] = {};
 
-namespace mscclpp {
+  sprintf(roceTypePath, "/sys/class/infiniband/%s/ports/%d/gid_attrs/types/%d",
+          deviceName, portNum, gidIndex);
 
-#if defined(USE_IBVERBS)
+
+  int fd = open(roceTypePath, O_RDONLY);
+  if (fd == -1) {
+    std::stringstream err;
+    err << "Failed while opening RoCE file path " << roceTypePath;
+    throw mscclpp::Error(err.str(), ErrorCode::InternalError);
+  }
+
+  int ret = read(fd, gidRoceVerStr, 15);
+  close(fd);
+
+  if (ret == -1) {
+    std::stringstream err;
+    err << "Failed while reading RoCE version";
+    throw mscclpp::Error(err.str(), ErrorCode::InternalError);
+  }
+
+  if (strlen(gidRoceVerStr)) {
+    if (strncmp(gidRoceVerStr, "IB/RoCE v1", strlen("IB/RoCE v1")) == 0
+        || strncmp(gidRoceVerStr, "RoCE v1", strlen("RoCE v1")) == 0) {
+      return 1;
+    }
+    else if (strncmp(gidRoceVerStr, "RoCE v2", strlen("RoCE v2")) == 0) {
+      return 2;
+    }
+  }
+  return -1;
+}
+
+static bool isIPv4MappedIPv6(const union ibv_gid &gid)
+{
+  // look for ::ffff:x.x.x.x format
+  // From Broadcom documentation
+  // https://techdocs.broadcom.com/us/en/storage-and-ethernet-connectivity/ethernet-nic-controllers/bcm957xxx/adapters/frequently-asked-questions1.html
+  // "The IPv4 address is really an IPv4 address mapped into the IPv6 address space.
+  // This can be identified by 80 “0” bits, followed by 16 “1” bits (“FFFF” in hexadecimal)
+  // followed by the original 32-bit IPv4 address."
+  return (gid.global.subnet_prefix == 0    &&
+          gid.raw[8]               == 0    &&
+          gid.raw[9]               == 0    &&
+          gid.raw[10]              == 0xff &&
+          gid.raw[11]              == 0xff);
+}
+
+
+static uint8_t getGidIndex(struct ibv_context* context, int const& ibPort, int const& gidTblLen)
+{
+  union ibv_gid gid;
+  GidPriority highestPriority = GidPriority::UNKNOWN;
+  int gidIndex = -1;
+  for (int i = 0; i < gidTblLen; ++i) {
+    if (ibv_query_gid(context, ibPort , i, &gid) != 0) continue;
+    if (!isConfiguredGid(&gid)) continue;
+    int gidCurrRoceVersion;
+    gidCurrRoceVersion = getRoceVersionNumber(context, ibPort, i);
+    if(gidCurrRoceVersion < 1) continue;
+    GidPriority currPriority;
+    if (isIPv4MappedIPv6(gid)) {
+      currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_IPV4 : GidPriority::ROCEV1_IPV4;
+    } else if (!isLinkLocalGid(gid)) {
+      currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_IPV6 : GidPriority::ROCEV1_IPV6;
+    } else {
+      currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_LINK_LOCAL : GidPriority::ROCEV1_LINK_LOCAL;
+    }
+    if(!env()->ibAllowLinkLocalGid && currPriority <= GidPriority::ROCEV2_LINK_LOCAL) continue;
+    if(currPriority > highestPriority) {
+      highestPriority = currPriority;
+      gidIndex = i;
+    }
+  }
+
+  if(highestPriority == GidPriority::UNKNOWN){
+    std::stringstream err;
+    err << "Auto GetGidIndex failed. Try setting MSCCLPP_IB_GID_INDEX directly";
+    throw mscclpp::Error(err.str(), ErrorCode::SystemError);
+  }
+  if(gidIndex >= UINT8_MAX || gidIndex < 0) {
+    throw mscclpp::Error("Invalid auto-deteced gidIndex : " + std::to_string(gidIndex), ErrorCode::SystemError);
+  }
+  return static_cast<uint8_t>(gidIndex);
+}
 
 IbMr::IbMr(ibv_pd* pd, void* buff, std::size_t size) : buff(buff) {
   if (size == 0) {
@@ -74,7 +249,7 @@ const void* IbMr::getBuff() const { return this->buff; }
 
 uint32_t IbMr::getLkey() const { return this->mr->lkey; }
 
-IbQp::IbQp(ibv_context* ctx, ibv_pd* pd, int port, int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr,
+IbQp::IbQp(ibv_context* ctx, ibv_pd* pd, int port, ibv_port_attr& portAttr, int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr,
            int maxWrPerSend)
     : numSignaledPostedItems(0), numSignaledStagedItems(0), maxCqPollNum(maxCqPollNum), maxWrPerSend(maxWrPerSend) {
   this->cq = IBVerbs::ibv_create_cq(ctx, maxCqSize, nullptr, nullptr, 0);
@@ -103,12 +278,6 @@ IbQp::IbQp(ibv_context* ctx, ibv_pd* pd, int port, int maxCqSize, int maxCqPollN
     throw mscclpp::IbError(err.str(), errno);
   }
 
-  struct ibv_port_attr portAttr;
-  if (IBVerbs::ibv_query_port_w(ctx, port, &portAttr) != 0) {
-    std::stringstream err;
-    err << "ibv_query_port failed (errno " << errno << ")";
-    throw mscclpp::IbError(err.str(), errno);
-  }
   this->info.lid = portAttr.lid;
   this->info.port = port;
   this->info.linkLayer = portAttr.link_layer;
@@ -117,8 +286,9 @@ IbQp::IbQp(ibv_context* ctx, ibv_pd* pd, int port, int maxCqSize, int maxCqPollN
   this->info.is_grh = (portAttr.flags & IBV_QPF_GRH_REQUIRED);
 
   if (portAttr.link_layer != IBV_LINK_LAYER_INFINIBAND || this->info.is_grh) {
+    this->info.gidIndex = (env()->ibGidIndex < 0) ? getGidIndex(ctx, port, portAttr.gid_tbl_len) : env()->ibGidIndex;
     union ibv_gid gid;
-    if (IBVerbs::ibv_query_gid(ctx, port, 0, &gid) != 0) {
+    if (IBVerbs::ibv_query_gid(ctx, port, this->info.gidIndex, &gid) != 0) {
       std::stringstream err;
       err << "ibv_query_gid failed (errno " << errno << ")";
       throw mscclpp::IbError(err.str(), errno);
@@ -164,9 +334,9 @@ void IbQp::rtr(const IbQpInfo& info) {
     qp_attr.ah_attr.grh.dgid.global.subnet_prefix = info.spn;
     qp_attr.ah_attr.grh.dgid.global.interface_id = info.iid;
     qp_attr.ah_attr.grh.flow_label = 0;
-    qp_attr.ah_attr.grh.sgid_index = 0;
+    qp_attr.ah_attr.grh.sgid_index = this->info.gidIndex;
     qp_attr.ah_attr.grh.hop_limit = 255;
-    qp_attr.ah_attr.grh.traffic_class = 0;
+    qp_attr.ah_attr.grh.traffic_class = env()->ibTrafficClass;
   } else {
     qp_attr.ah_attr.is_global = 0;
   }
@@ -290,7 +460,19 @@ void IbQp::postSend() {
 int IbQp::pollCq() {
   int wcNum = IBVerbs::ibv_poll_cq(this->cq, this->maxCqPollNum, this->wcs->data());
   if (wcNum > 0) {
-    this->numSignaledPostedItems -= wcNum;
+    for (int i = 0; i < wcNum; ++i) {
+      if ((*this->wcs)[i].status != IBV_WC_SUCCESS) {
+        std::stringstream err;
+        err << "Work completion at index " << i << " failed with status " << (*this->wcs)[i].status
+            << " (" << IBVerbs::ibv_wc_status_str((*this->wcs)[i].status) << ")";
+        throw mscclpp::IbError(err.str(), (*this->wcs)[i].status);
+      }
+      this->numSignaledPostedItems--;
+    }
+  } else if (wcNum < 0) {
+      std::stringstream err;
+      err << "ibv_poll_cq failed with negative completion";
+      throw mscclpp::IbError(err.str(), errno);
   }
   return wcNum;
 }
@@ -300,11 +482,10 @@ int IbQp::getWcStatus(int idx) const { return (*this->wcs)[idx].status; }
 int IbQp::getNumCqItems() const { return this->numSignaledPostedItems; }
 
 IbCtx::IbCtx(const std::string& devName) : devName(devName) {
-#if !defined(__HIP_PLATFORM_AMD__)
-  if (!checkNvPeerMemLoaded()) {
-    throw mscclpp::Error("nvidia_peermem kernel module is not loaded", ErrorCode::InternalError);
+  if (!checkPeerMemLoaded()) {
+    throw mscclpp::Error("nvidia/amd_peermem kernel module is not loaded", ErrorCode::InternalError);
   }
-#endif  // !defined(__HIP_PLATFORM_AMD__)
+
   int num;
   struct ibv_device** devices = IBVerbs::ibv_get_device_list(&num);
   for (int i = 0; i < num; ++i) {
@@ -338,8 +519,7 @@ IbCtx::~IbCtx() {
   }
 }
 
-bool IbCtx::isPortUsable(int port) const {
-  struct ibv_port_attr portAttr;
+bool IbCtx::isPortUsable(int port, struct ibv_port_attr& portAttr) const {
   if (IBVerbs::ibv_query_port_w(this->ctx, port, &portAttr) != 0) {
     std::stringstream err;
     err << "ibv_query_port failed (errno " << errno << ", port << " << port << ")";
@@ -349,7 +529,7 @@ bool IbCtx::isPortUsable(int port) const {
          (portAttr.link_layer == IBV_LINK_LAYER_ETHERNET || portAttr.link_layer == IBV_LINK_LAYER_INFINIBAND);
 }
 
-int IbCtx::getAnyActivePort() const {
+int IbCtx::getAnyActivePort(struct ibv_port_attr& portAttr) const {
   struct ibv_device_attr devAttr;
   if (IBVerbs::ibv_query_device(this->ctx, &devAttr) != 0) {
     std::stringstream err;
@@ -357,7 +537,7 @@ int IbCtx::getAnyActivePort() const {
     throw mscclpp::IbError(err.str(), errno);
   }
   for (uint8_t port = 1; port <= devAttr.phys_port_cnt; ++port) {
-    if (this->isPortUsable(port)) {
+    if (this->isPortUsable(port, portAttr)) {
       return port;
     }
   }
@@ -366,15 +546,16 @@ int IbCtx::getAnyActivePort() const {
 
 IbQp* IbCtx::createQp(int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr, int maxWrPerSend,
                       int port /*=-1*/) {
+  struct ibv_port_attr portAttr;
   if (port == -1) {
-    port = this->getAnyActivePort();
+    port = this->getAnyActivePort(portAttr);
     if (port == -1) {
       throw mscclpp::Error("No active port found", ErrorCode::InvalidUsage);
     }
-  } else if (!this->isPortUsable(port)) {
+  } else if (!this->isPortUsable(port, portAttr)) {
     throw mscclpp::Error("invalid IB port: " + std::to_string(port), ErrorCode::InvalidUsage);
   }
-  qps.emplace_back(new IbQp(this->ctx, this->pd, port, maxCqSize, maxCqPollNum, maxSendWr, maxRecvWr, maxWrPerSend));
+  qps.emplace_back(new IbQp(this->ctx, this->pd, port, portAttr, maxCqSize, maxCqPollNum, maxSendWr, maxRecvWr, maxWrPerSend));
   return qps.back().get();
 }
 
@@ -385,7 +566,7 @@ const IbMr* IbCtx::registerMr(void* buff, std::size_t size) {
 
 MSCCLPP_API_CPP int getIBDeviceCount() {
   int num;
-  IBVerbs::ibv_get_device_list(&num);
+  auto const& dev = getActiveIbDeviceNames(num);
   return num;
 }
 
@@ -442,20 +623,20 @@ MSCCLPP_API_CPP std::string getIBDeviceName(Transport ibTransport) {
   }
 
   int num;
-  struct ibv_device** devices = IBVerbs::ibv_get_device_list(&num);
+  auto const& devices = getActiveIbDeviceNames(num);
   if (ibTransportIndex >= num) {
     std::stringstream ss;
     ss << "IB transport out of range: " << ibTransportIndex << " >= " << num;
     throw Error(ss.str(), ErrorCode::InvalidUsage);
   }
-  return devices[ibTransportIndex]->name;
+  return devices[ibTransportIndex];
 }
 
 MSCCLPP_API_CPP Transport getIBTransportByDeviceName(const std::string& ibDeviceName) {
   int num;
-  struct ibv_device** devices = IBVerbs::ibv_get_device_list(&num);
+  auto const& devices = getActiveIbDeviceNames(num);
   for (int i = 0; i < num; ++i) {
-    if (ibDeviceName == devices[i]->name) {
+    if (ibDeviceName == devices[i]) {
       switch (i) {  // TODO: get rid of this ugly switch
         case 0:
           return Transport::IB0;

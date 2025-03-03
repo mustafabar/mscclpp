@@ -18,6 +18,7 @@ struct ibv_cq;
 struct ibv_wc;
 struct ibv_send_wr;
 struct ibv_sge;
+struct ibv_port_attr;
 
 namespace mscclpp {
 
@@ -54,6 +55,7 @@ struct IbQpInfo {
   int mtu;
   uint64_t iid;
   bool is_grh;
+  uint8_t gidIndex;
 };
 
 enum class WsStatus {
@@ -90,7 +92,7 @@ class IbQp {
     ibv_sge* sge;
   };
 
-  IbQp(ibv_context* ctx, ibv_pd* pd, int port, int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr,
+  IbQp(ibv_context* ctx, ibv_pd* pd, int port, ibv_port_attr& portAttr, int maxCqSize, int maxCqPollNum, int maxSendWr, int maxRecvWr,
        int maxWrPerSend);
   WrInfo getNewWrInfo();
 
@@ -132,9 +134,9 @@ class IbCtx {
 
   const std::string& getDevName() const { return this->devName; };
 
+  int getAnyActivePort(struct ibv_port_attr& portAttr) const;
  private:
-  bool isPortUsable(int port) const;
-  int getAnyActivePort() const;
+  bool isPortUsable(int port, struct ibv_port_attr& portAttr) const;
 
   const std::string devName;
   ibv_context* ctx;
@@ -142,7 +144,21 @@ class IbCtx {
   std::list<std::unique_ptr<IbQp>> qps;
   std::list<std::unique_ptr<IbMr>> mrs;
 };
-
+/**
+  * Enumeration of GID priority
+  *
+  * @note These are the GID types ordered in priority from lowest (0) to highest
+  */
+enum GidPriority
+{
+  UNKNOWN           = -1,                      ///< Default
+  ROCEV1_LINK_LOCAL = 0,                       ///< RoCEv1 Link-local
+  ROCEV2_LINK_LOCAL = 1,                       ///< RoCEv2 Link-local fe80::/10
+  ROCEV1_IPV6       = 2,                       ///< RoCEv1 IPv6
+  ROCEV2_IPV6       = 3,                       ///< RoCEv2 IPv6
+  ROCEV1_IPV4       = 4,                       ///< RoCEv1 IPv4-mapped IPv6
+  ROCEV2_IPV4       = 5,                       ///< RoCEv2 IPv4-mapped IPv6 ::ffff:192.168.x.x
+};
 }  // namespace mscclpp
 
 #endif  // MSCCLPP_IB_HPP_
