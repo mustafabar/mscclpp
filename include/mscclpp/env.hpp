@@ -32,6 +32,7 @@ class Env {
   const bool cudaIpcUseDefaultStream;
   const int ibGidIndex;
   const int ibTrafficClass;
+  const bool ibAllowLinkLocalGid;
 
  private:
   Env();

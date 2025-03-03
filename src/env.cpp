@@ -64,7 +64,8 @@ Env::Env()
       npkitDumpDir(readEnv<std::string>("MSCCLPP_NPKIT_DUMP_DIR", "")),
       cudaIpcUseDefaultStream(readEnv<bool>("MSCCLPP_CUDAIPC_USE_DEFAULT_STREAM", false)),
       ibGidIndex(readEnv<int>("MSCCLPP_IB_GID_INDEX", -1)),
-      ibTrafficClass(readEnv<int>("MSCCLPP_IB_TC", 0)) {}
+      ibTrafficClass(readEnv<int>("MSCCLPP_IB_TC", 0)),
+      ibAllowLinkLocalGid(readEnv<bool>("MSCCLPP_IB_ALLOW_LINKLOCAL_GID", false)) {}
 
 std::shared_ptr<Env> env() {
   static std::shared_ptr<Env> globalEnv = std::shared_ptr<Env>(new Env());
@@ -85,6 +86,7 @@ std::shared_ptr<Env> env() {
     logEnv("MSCCLPP_CUDAIPC_USE_DEFAULT_STREAM", globalEnv->cudaIpcUseDefaultStream);
     logEnv("MSCCLPP_IB_GID_INDEX", globalEnv->ibGidIndex);
     logEnv("MSCCLPP_IB_TC", globalEnv->ibTrafficClass);
+    logEnv("MSCCLPP_IB_ALLOW_LINKLOCAL_GID", globalEnv->ibAllowLinkLocalGid);
   }
   return globalEnv;
 }

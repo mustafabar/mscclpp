@@ -197,6 +197,7 @@ static uint8_t getGidIndex(struct ibv_context* context, int const& ibPort, int c
     } else {
       currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_LINK_LOCAL : GidPriority::ROCEV1_LINK_LOCAL;
     }
+    if(!env()->ibAllowLinkLocalGid && currPriority <= GidPriority::ROCEV2_LINK_LOCAL) continue;
     if(currPriority > highestPriority) {
       highestPriority = currPriority;
       gidIndex = i;
